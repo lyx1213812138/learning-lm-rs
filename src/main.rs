@@ -4,7 +4,6 @@ mod model;
 mod operators;
 mod params;
 mod tensor;
-mod check_names;
 
 use std::path::PathBuf;
 use tokenizers::Tokenizer;
@@ -25,6 +24,6 @@ fn main() {
         30,
         1.,
     );
-    
+
     println!("{}", tokenizer.decode(&output_ids, true).unwrap());
 }
