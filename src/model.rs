@@ -1,11 +1,13 @@
 use std::fs::File;
 use std::vec;
 
+// LEARN crate 是 Rust 中的一个关键字，表示当前的 crate（即当前项目或库）。
 use crate::config::LlamaConfigJson;
 use crate::kvcache::KVCache;
 use crate::operators as OP;
 use crate::params::LLamaParams;
 use crate::tensor::Tensor;
+use rand::seq;
 use safetensors::SafeTensors;
 use std::path::Path;
 pub struct Llama<T> {
@@ -66,6 +68,7 @@ impl Llama<f32> {
         let mut q_buf = Tensor::<f32>::default(&vec![seq_len, self.n_q_h * self.dqkv]);
         let mut att_scores =
             Tensor::<f32>::default(&vec![self.n_kv_h, n_groups, seq_len, total_seq_len]);
+        let mut att_sv = Tensor::<f32>::default(&vec![seq_len, self.n_q_h * self.dqkv]);
         let mut gate_buf = Tensor::<f32>::default(&vec![seq_len, self.di]);
         let mut up_buf = Tensor::<f32>::default(&vec![seq_len, self.di]);
 
@@ -101,10 +104,27 @@ impl Llama<f32> {
             let full_k = &mut cache.k_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
             let full_v = &mut cache.v_cache(layer, 0); // (total_seq, n_kv_h * dqkv)
 
-            todo!("self_attention(...)");
-            todo!("down_proj matmul and add residual");
+            // todo!("self_attention(...)");
 
-            todo!("mlp(...)");
+            self_attention(&mut att_sv, &mut att_scores, q, full_k, full_v, self.n_kv_h, n_groups, seq_len, total_seq_len, self.dqkv);
+            
+            // todo!("down_proj降维 matmul and add residual");
+            // out = attn_V @ O_weight.T
+            // residual = out + residual
+            OP::matmul_transb(&mut residual, 1., &att_sv, &self.params.wo[layer], 1.);
+
+            // todo!("mlp(...)");
+            mlp(
+                &mut residual,
+                &mut hidden_states,
+                &mut gate_buf,
+                &mut up_buf,
+                &self.params.w_up[layer],
+                &self.params.w_down[layer],
+                &self.params.w_gate[layer],
+                &self.params.rms_ffn_w[layer],
+                self.eps,
+            );
         }
 
         // No matter what seq_len, the output is always a 1D vector of length vocab,
@@ -134,8 +154,34 @@ impl Llama<f32> {
         temperature: f32,
     ) -> Vec<u32>{
         let mut result = Vec::<u32>::new();
+        let mut cache = self.new_cache();
+        for &id in token_ids {
+            result.push(id);
+        }
         
-        todo!("实现文本生成");
+        let mut first_loop = true;
+        let mut input = Tensor::<u32>::default(&vec![1]);
+        let first_input = Tensor::<u32>::new(token_ids.to_vec(), &vec![token_ids.len()]);
+        while result.len() < max_len {
+            let now_res = self.forward(if first_loop { 
+                first_loop = false;
+                &first_input
+            } else {
+                &input
+            }, &mut cache);
+            let _now_res = now_res.data();
+            let mut choose: u32 = 0;
+            for i in 0..self.vocab {
+                if _now_res[i] > _now_res[choose as usize] {
+                    choose = i as u32;
+                }
+            }
+            result.push(choose);
+            input = Tensor::<u32>::new(vec![choose], &vec![1]);
+            if choose == self.eos_token_id {
+                break;
+            }
+        }
         
         result
     }
@@ -148,12 +194,67 @@ fn self_attention(
     k: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
     v: &Tensor<f32>,                 // (total_seq, n_kv_h * dqkv)
     n_kv_h: usize,
-    n_groups: usize,
-    seq_len: usize,
-    total_seq_len: usize,
-    dqkv: usize,
+    n_groups: usize,                 // heads num of kv * n_groups = heads num of q
+    seq_len: usize,                  // 当前输入序列的长度
+    total_seq_len: usize,            // 总共输入序列的长度
+    dqkv: usize,                     // q k v 的 dimension
 ) {
-    todo!("Implement self_attention");
+    // score = Q @ K.T / sqrt(dim)
+    {
+        assert!(q.size() == seq_len * n_kv_h * n_groups * dqkv);
+        assert!(k.size() == total_seq_len * n_kv_h * dqkv);
+        let _att_scores = unsafe {
+            att_scores.data_mut()
+        };
+        let _q = q.data();
+        let _k = k.data();
+        let sqd = (dqkv as f32).sqrt();
+        for iq in 0..seq_len { // q of each token
+            for ik in 0..total_seq_len { // k of each token
+                for ihq in 0..n_groups * n_kv_h { // q of each head
+                    let ihk = ihq / n_groups;
+                    _att_scores[ihq*seq_len*total_seq_len+iq*total_seq_len+ik] = 0.0;
+                    for j in 0..dqkv {
+                        // att_scores[ihq, iq, ik] += q[iq, ihq * dqkv + j] * k[ik, ihk * dqkv + j];
+                        _att_scores[ihq*seq_len*total_seq_len+iq*total_seq_len+ik] 
+                            += _q[iq*n_kv_h*n_groups*dqkv+ihq*dqkv+j] * _k[ik*n_kv_h*dqkv+ihk*dqkv+j] / sqd;
+                    }
+                }
+            }
+        }
+    }
+
+    // attn = softmax(score)
+    OP::masked_softmax(att_scores);
+    
+    {
+        let _att_scores = unsafe {
+            att_scores.data_mut()
+        };
+        let _hidden_states = unsafe {
+            hidden_states.data_mut()
+        };
+        let _v = v.data();
+        // attn_V = attn @ V 
+        //  (seq, n_kv_h * n_groups * dqkv)
+        for iq in 0..n_kv_h * n_groups {
+            for i in 0..seq_len {
+                for j in 0..dqkv {
+                    _hidden_states[i * n_kv_h * n_groups * dqkv + iq * dqkv + j] = 0.0;
+                    for k in 0..total_seq_len {
+                        let ik = iq / n_groups;
+                        _hidden_states[i * n_kv_h * n_groups * dqkv + iq * dqkv + j] 
+                            += _att_scores[iq * seq_len * total_seq_len + i * total_seq_len + k] * _v[k * n_kv_h * dqkv + ik * dqkv + j];
+                    }
+                }
+            }
+        }
+    }
+
+    // out = attn_V @ O_weight.T
+    //  (seq, n_kv_h * n_groups * dq
+
+    // residual = out + residual
 }
 
 fn mlp(
@@ -167,7 +268,16 @@ fn mlp(
     rms_w: &Tensor<f32>,
     eps: f32,
 ) {
-    todo!("Implement mlp");
+    /* LEARN 具体来说，残差连接是指在神经网络的相邻层之间，将前一层的输出直接添加到后面某一层的输出上。
+    这样做的好处是，它为网络中的梯度提供了一条直接的传播路径，使得梯度可以绕过中间的层直接向前传播，
+    从而避免了梯度在经过多层传播时的衰减或爆炸，使得网络能够更容易地训练更深的结构。 */
+    OP::rms_norm(hidden_states, residual, rms_w, eps);
+    OP::matmul_transb(gate, 0., hidden_states, w_gate, 1.);
+    OP::matmul_transb(up, 0., hidden_states, w_up, 1.);
+    // up.print();
+    // gate.print();
+    OP::swiglu(up, gate);
+    OP::matmul_transb(residual, 1., up, w_down, 1.);
 }
 
 #[test]

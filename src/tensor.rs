@@ -24,7 +24,7 @@ impl<T: Copy + Clone + Default> Tensor<T> {
     }
 
     pub fn data(&self) -> &[T] {
-        &self.data[self.offset..][..self.length]
+        &self.data[self.offset..][..self.length] // data[offset - offset+length-1]
     }
 
     pub unsafe fn data_mut(&mut self) -> &mut [T] {

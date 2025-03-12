@@ -1,3 +1,5 @@
+// use std::intrinsics::exp2f64;
+
 use crate::tensor::Tensor;
 
 // get (row) vectors from a 2D table given a list of indices
@@ -71,25 +73,76 @@ pub fn masked_softmax(y: &mut Tensor<f32>) {
 }
 
 pub fn rms_norm(y: &mut Tensor<f32>, x: &Tensor<f32>, w: &Tensor<f32>, epsilon: f32) {
-    todo!("实现 rms_norm，计算前做一些必要的检查会帮助你后续调试")
+    // todo!("实现 rms_norm，计算前做一些必要的检查会帮助你后续调试")
+    let len = y.size();
+    let n = w.size();
+    assert!(len == x.size());
+    assert!(len % n == 0);
+
+    let _y = unsafe { y.data_mut() };
+    let _x = x.data();
+    let _w = w.data();
+
+    for i in 0..len/n {
+        let mut sum = 0f32;
+        for j in 0..n {
+            sum += _x[i*n+j] * _x[i*n+j];
+        }
+        let norm = (sum / n as f32 + epsilon).sqrt();
+
+        for j in 0..n {
+            _y[i*n+j] = _w[j] * _x[i*n+j] / norm;
+        }
+    }    
 }
 
 // y = silu(x) * y
 // hint: this is an element-wise operation
 pub fn swiglu(y: &mut Tensor<f32>, x: &Tensor<f32>) {
-    // let len = y.size();
-    // assert!(len == x.size());
+    /* LEARN SwiGLU在大语言模型中表现出色，能够显著提高模型的性能。
+    它在保持非线性激活的同时，通过门控机制增强了模型对输入信息的选择性，
+    使得模型能够更有效地学习复杂的语义关系。 */
 
-    // let _y = unsafe { y.data_mut() };
-    // let _x = x.data();
+    let len = y.size();
+    assert!(len == x.size());
 
-    todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
+    let _y = unsafe { y.data_mut() };
+    let _x = x.data();
+
+    for i in 0..len {
+        _y[i] *= _x[i] / (1f32 + (-_x[i]).exp());
+    }
+
+    // todo!("实现 silu，这里给了一些前期准备工作的提示，你可以参考")
 }
 
 // C = beta * C + alpha * A @ B^T
 // hint: You don't need to do an explicit transpose of B
+// 你可以默认输入输出都是二维矩阵，即 A 形状为 m×k，B 形状为 n×k，C 形状为 m×n，可以不用考虑广播的情况。
 pub fn matmul_transb(c: &mut Tensor<f32>, beta: f32, a: &Tensor<f32>, b: &Tensor<f32>, alpha: f32) {
-    todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");
+    // todo!("实现 matmul_transb，计算前做一些必要的检查会帮助你后续调试");
+    assert!(a.shape().len() == 2);
+    assert!(b.shape().len() == 2);
+    assert!(c.shape().len() == 2);
+    assert!(a.shape()[1] == b.shape()[1]);
+    assert!(c.shape()[0] == a.shape()[0]);
+    assert!(c.shape()[1] == b.shape()[0]);
+
+    let shape = c.shape().to_vec();
+    let _c = unsafe { c.data_mut() };
+    let _a = a.data();
+    let _b = b.data();
+    let m = shape[0];
+    let n = shape[1];
+    let k = a.shape()[1];
+    for i in 0..m {
+        for j in 0..n {
+            _c[i*n+j] *= beta;
+            for t in 0..k {
+                _c[i*n+j] += _a[i*k+t] * _b[j*k+t] * alpha;
+            }
+        }
+    }
 }
 
 // Dot product of two tensors (treated as vectors)

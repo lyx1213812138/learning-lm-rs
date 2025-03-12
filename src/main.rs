@@ -4,6 +4,7 @@ mod model;
 mod operators;
 mod params;
 mod tensor;
+mod check_names;
 
 use std::path::PathBuf;
 use tokenizers::Tokenizer;
@@ -16,7 +17,7 @@ fn main() {
     let input = "Once upon a time";
     let binding = tokenizer.encode(input, true).unwrap();
     let input_ids = binding.get_ids();
-    print!("\n{}", input);
+    // print!("\n{}", input);
     let output_ids = llama.generate(
         input_ids,
         500,
